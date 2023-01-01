@@ -129,7 +129,7 @@ class StateCVRP(NamedTuple):
     def get_current_node(self):
         return self.prev_a
 
-    def get_mask(self):
+    def get_mask(self, eps=1e-6):
         """
         Gets a (batch_size, n_loc + 1) mask with the feasible actions (0 = depot), depends on already visited and
         remaining capacity. 0 = feasible, 1 = infeasible
@@ -143,7 +143,7 @@ class StateCVRP(NamedTuple):
             visited_loc = mask_long2bool(self.visited_, n=self.demand.size(-1))
 
         # For demand steps_dim is inserted by indexing with id, for used_capacity insert node dim for broadcasting
-        exceeds_cap = (self.demand[self.ids, :] + self.used_capacity[:, :, None] > self.VEHICLE_CAPACITY)
+        exceeds_cap = (self.demand[self.ids, :] + self.used_capacity[:, :, None] > self.VEHICLE_CAPACITY + eps)
         # Nodes that cannot be visited are already visited or too much demand to be served now
         mask_loc = visited_loc.to(exceeds_cap.dtype) | exceeds_cap
 
