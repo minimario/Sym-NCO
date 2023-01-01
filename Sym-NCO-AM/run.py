@@ -172,7 +172,7 @@ def run(opts):
 
 if __name__ == "__main__":
     options = get_options()
-    wandb.init(project="routing-symmetric", entity="routing-online-symnco")
+    wandb.init(project="routing-symmetric", entity="routing_symmetric")
     wandb.run.name = options.wandb_run_name
     wandb.config.update(options)
     run(options)
