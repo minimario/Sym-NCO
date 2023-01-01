@@ -62,11 +62,14 @@ def get_options(args=None):
                              ' to save memory (default None means no shrinking)')
     parser.add_argument('--data_distribution', type=str, default=None,
                         help='Data distribution to use during training, defaults and options depend on problem.')
+    parser.add_argument('--num_equivariant_samples', type=int, default=0, help="number of symmetric samples in loss") # TODO(alex): add doc
+    parser.add_argument('--supervise_lambda', type=float, default=0.01, help='weight for the supervision loss')
 
     # Misc
     parser.add_argument('--log_step', type=int, default=50, help='Log info every log_step steps')
     parser.add_argument('--log_dir', default='logs', help='Directory to write TensorBoard information to')
     parser.add_argument('--run_name', default='Symnco_pointer', help='Name to identify the run')
+    parser.add_argument('--wandb_run_name', default='run', help='Name to identify the run')
     parser.add_argument('--output_dir', default='outputs', help='Directory to write output models to')
     parser.add_argument('--epoch_start', type=int, default=0,
                         help='Start at epoch # (relevant for learning rate decay)')

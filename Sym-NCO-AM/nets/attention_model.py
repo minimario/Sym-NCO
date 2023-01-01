@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
@@ -52,7 +53,8 @@ class AttentionModel(nn.Module):
                  normalization='batch',
                  n_heads=8,
                  checkpoint_encoder=False,
-                 shrink_size=None,K=4):
+                 shrink_size=None,
+                 K=4):
         super(AttentionModel, self).__init__()
 
         self.embedding_dim = embedding_dim
@@ -128,7 +130,121 @@ class AttentionModel(nn.Module):
         if temp is not None:  # Do not change temperature if not provided
             self.temp = temp
 
-    def forward(self, input, return_pi=False,return_proj=False):
+    def get_starts(self, pi):
+        def unpack_routes(routes):
+            return [r[r != 0] for r in np.split(routes, np.where(routes == 0)[0]) if (r != 0).any()]
+
+        def go(pi):
+            ends = []
+            routes = [unpack_routes(routes) for routes in pi.detach().cpu().numpy()]
+            all_ends = []
+            for batch in routes:
+                ends = []
+                for route in batch:
+                    route = route.astype(np.int16)
+                    if len(route) > 1:
+                        ends.append(route[0])
+                        ends.append(route[-1])
+                    else:
+                        ends.append(route[0])
+                all_ends.append(ends)
+            return all_ends
+
+        return go(pi)
+
+    def randomly_transform_pi(self, pi):
+        def unpack_routes(routes):
+            return [r[r != 0] for r in np.split(routes, np.where(routes == 0)[0]) if (r != 0).any()]
+        
+        def permute_routes(routes):
+            np.random.shuffle(routes)
+            for i in range(len(routes)):
+                if np.random.randint(2) == 1:
+                    routes[i] = routes[i][::-1]
+            return routes
+
+        def pack_routes(routes, max_len_tour, left_pad=0, right_pad=None):
+            routes = np.concatenate([r_ for r in routes for r_ in (r, [0])])[:-1]
+            max_len_tour = max_len_tour or len(routes)
+            right_pad = (max_len_tour - len(routes) - left_pad) if right_pad is None else right_pad
+            return np.pad(routes, (left_pad, right_pad)).astype(np.int16) 
+
+        def go(pi):
+            routes = [unpack_routes(routes) for routes in pi.detach().cpu().numpy()]
+            routes = [permute_routes(routes) for routes in routes]
+            routes = [pack_routes(routes, max_len_tour=pi.size(-1)) for routes in routes]
+            routes = [torch.tensor(route, device=pi.device, dtype=pi.dtype) for route in routes]
+            return torch.stack(routes)
+        
+        return go(pi)
+
+    def transform_pi(self, input, pi):
+        def cart2pol(x, y):
+            rho = np.sqrt(x ** 2 + y ** 2)
+            phi = np.arctan2(y, x)
+            return (rho, phi)
+
+        def pol2cart(rho, phi):
+            x = rho * np.cos(phi)
+            y = rho * np.sin(phi)
+            return (x, y)
+
+        def pad_to(array, *lengths, **kwargs):
+            lengths = lengths + array.shape[len(lengths):]
+            return np.pad(array, [(0, n_pad - n) for n_pad, n in zip(lengths, array.shape)], **kwargs)
+
+        def pad_each(array, length=None):
+            length = length or max(len(row) for row in array)
+            return np.array([pad_to(row, length) for row in array])
+
+        def pack_routes(routes, max_len_tour=None, left_pad=0, right_pad=None):
+            routes = np.concatenate([r_ for r in routes for r_ in (r, [0])])[:-1]
+            max_len_tour = max_len_tour or len(routes)
+            right_pad = (max_len_tour - len(routes) - left_pad) if right_pad is None else right_pad
+            return np.pad(routes, (left_pad, right_pad)).astype(np.int16)
+
+        def unpack_routes(routes):  # Split zero-padded concatenated routes into separate arrays
+            routes = [r[r != 0] for r in np.split(routes, np.where(routes == 0)[0]) if (r != 0).any()]
+            # [r[:-1] if r[-1] == 0 else r for r in np.split(routes, np.where(routes == 0)[0] + 1) if len(r)]
+            return routes # [r for r in routes if len(r)]
+
+        def clockwise_route(route, xys):
+            route_xys = xys[[0] + route.tolist() + [0]]
+            xs, ys = route_xys[:, 0], route_xys[:, 1]
+
+            dir_xs = xs[1:] - xs[:-1]
+            # dir_ys = ys[1:] - ys[:-1]
+            sum_nei_ys = ys[1:] + ys[:-1]
+            value1 = (dir_xs / sum_nei_ys).sum()
+
+            reverse_xs, reverse_ys = xs[::-1], ys[::-1]
+            # dir_reverse_xs = reverse_xs[1:] - reverse_xs[:-1]
+            dir_reverse_ys = reverse_xs[1:] - reverse_xs[:-1]
+            sum_reverse_nei_ys = ys[1:] + ys[:-1]
+            value2 = (dir_reverse_ys / sum_reverse_nei_ys).sum()
+            return route if value1 > value2 else route[::-1]
+
+        # compute route centroids for each route
+        # sort then base on radial angle
+        routes_b = [unpack_routes(routes) for routes in pi.detach().cpu().numpy()]
+        route_centroids_centered_b = [np.stack([loc[ri-1].mean(axis=0) - depot for ri in routes]) for routes, loc, depot in
+                             zip(routes_b, input['loc'].cpu().numpy(), input['depot'].cpu().numpy())]
+        phi_centroids_b = [cart2pol(route_centroids[:, 0], route_centroids[:, 1])[1]
+                           for route_centroids in route_centroids_centered_b]
+        phi_centroids_b = [phi_centroids + 2 * np.pi * (phi_centroids < 0) for phi_centroids in phi_centroids_b]
+        routes_idx_t_b = [np.argsort(phi_centroids) for phi_centroids in phi_centroids_b]
+        route_t_b = [[clockwise_route(routes[ri], np.vstack([depot, loc])) for ri in routes_idx]
+                     for routes, routes_idx, loc, depot in zip(routes_b, routes_idx_t_b,
+                                                               input['loc'].cpu().numpy(), input['depot'].cpu().numpy())]
+        pi_t = torch.stack([torch.tensor(pack_routes(routes, max_len_tour=pi.size(-1)),
+                                         device=pi.device, dtype=pi.dtype) for routes in route_t_b])
+        return pi_t
+
+    def forward(self, 
+                input, 
+                num_equivariant_samples, 
+                return_pi=False,
+                return_proj=False):
         """
         :param input: (batch_size, graph_size, node_dim) input node features or dictionary with multiple tensors
         :param return_pi: whether to return the output sequences, this is optional as it is not compatible with
@@ -143,19 +259,36 @@ class AttentionModel(nn.Module):
 
 
         _log_p, pi = self._inner(input, embeddings)
-        
-        
+
+        if num_equivariant_samples > 0:
+            pi_t_list = []
+            ll_t_list = []
+            for i in range(num_equivariant_samples):
+                pi_t = self.randomly_transform_pi(pi)
+                _log_p_t = self._inner_fixed_action(input, embeddings, pi_t)
+                cost_t, mask_t = self.problem.get_costs(input, pi_t)
+                ll_t = self._calc_log_likelihood(_log_p_t, pi_t, mask_t)
+                pi_t_list.append(pi_t)
+                ll_t_list.append(ll_t)
 
         cost, mask = self.problem.get_costs(input, pi)
         # Log likelyhood is calculated within the model since returning it per action does not work well with
         # DataParallel since sequences can be of different lengths
         ll = self._calc_log_likelihood(_log_p, pi, mask)
         if return_pi:
-            return cost, ll, pi
+            if num_equivariant_samples > 0:
+                return cost, ll, pi, ll_t_list, pi_t_list
+            else:
+                return cost, ll, pi
         if return_proj:
-            return cost,ll, self.projection_head(embeddings)
-
-        return cost, ll
+            if num_equivariant_samples > 0:
+                return cost, ll, ll_t_list, self.projection_head(embeddings)
+            else:
+                return cost, ll, self.projection_head(embeddings)
+        if num_equivariant_samples > 0:
+            return cost, ll, ll_t_list
+        else:
+            return cost, ll
 
     def beam_search(self, *args, **kwargs):
         return self.problem.beam_search(*args, **kwargs, model=self)
@@ -289,6 +422,53 @@ class AttentionModel(nn.Module):
 
         # Collected lists, return Tensor
         return torch.stack(outputs, 1), torch.stack(sequences, 1)
+
+    def _inner_fixed_action(self, input, embeddings, sequences):
+
+        outputs = []
+
+        state = self.problem.make_state(input)
+
+        # Compute keys, values for the glimpse and keys for the logits once as they can be reused in every step
+        fixed = self._precompute(embeddings)
+
+        batch_size = state.ids.size(0)
+
+        # Perform decoding steps
+        for i in range(sequences.shape[1]):
+            if self.shrink_size is not None:
+                unfinished = torch.nonzero(state.get_finished() == 0)
+                if len(unfinished) == 0:
+                    break
+                unfinished = unfinished[:, 0]
+                # Check if we can shrink by at least shrink_size and if this leaves at least 16
+                # (otherwise batch norm will not work well and it is inefficient anyway)
+                if 16 <= len(unfinished) <= state.ids.size(0) - self.shrink_size:
+                    # Filter states
+                    state = state[unfinished]
+                    fixed = fixed[unfinished]
+
+            log_p, mask = self._get_log_p(fixed, state)
+
+            # Select the indices of the next nodes in the sequences, result (batch_size) long
+            selected = sequences[:, i]
+
+            state = state.update(selected)
+
+            # Now make log_p, selected desired output size by 'unshrinking'
+            if self.shrink_size is not None and state.ids.size(0) < batch_size:
+                log_p_, selected_ = log_p, selected
+                log_p = log_p_.new_zeros(batch_size, *log_p_.size()[1:])
+                selected = selected_.new_zeros(batch_size)
+
+                log_p[state.ids[:, 0]] = log_p_
+                selected[state.ids[:, 0]] = selected_
+
+            # Collect output of step
+            outputs.append(log_p[:, 0, :])
+
+        # Collected lists, return Tensor
+        return torch.stack(outputs, 1)
 
     def sample_many(self, input, batch_rep=1, iter_rep=1):
         """
@@ -524,6 +704,6 @@ class AttentionModel(nn.Module):
 
         return (
             v.contiguous().view(v.size(0), v.size(1), v.size(2), self.n_heads, -1)
-                .expand(v.size(0), v.size(1) if num_steps is None else num_steps, v.size(2), self.n_heads, -1)
-                .permute(3, 0, 1, 2, 4)  # (n_heads, batch_size, num_steps, graph_size, head_dim)
+            .expand(v.size(0), v.size(1) if num_steps is None else num_steps, v.size(2), self.n_heads, -1)
+            .permute(3, 0, 1, 2, 4)  # (n_heads, batch_size, num_steps, graph_size, head_dim)
         )

@@ -3,6 +3,7 @@
 import os
 import json
 import pprint as pp
+import wandb
 
 import torch
 import torch.optim as optim
@@ -65,7 +66,8 @@ def run(opts):
         normalization=opts.normalization,
         tanh_clipping=opts.tanh_clipping,
         checkpoint_encoder=opts.checkpoint_encoder,
-        shrink_size=opts.shrink_size, K=opts.K
+        shrink_size=opts.shrink_size, 
+        K=opts.K
     ).to(opts.device)
 
     if opts.use_cuda and torch.cuda.device_count() > 1:
@@ -169,4 +171,8 @@ def run(opts):
 
 
 if __name__ == "__main__":
-    run(get_options())
+    options = get_options()
+    wandb.init(project="routing-symmetric", entity="routing-online-symnco")
+    wandb.run.name = options.wandb_run_name
+    wandb.config.update(options)
+    run(options)

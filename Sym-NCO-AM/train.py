@@ -10,7 +10,7 @@ from torch.nn import CosineSimilarity
 from nets.attention_model import set_decode_type
 from utils.log_utils import log_values
 from utils import move_to
-# import wandb
+import wandb
 
 # wandb.init(project="model-agnostic", entity="alstn12088")
 
@@ -41,7 +41,7 @@ def rollout(model, dataset, opts):
         
 
         with torch.no_grad():
-            cost, _ = model(move_to(bat, opts.device))
+            cost, _ = model(move_to(bat, opts.device), num_equivariant_samples=0)
 
         return cost.data.cpu()
 
@@ -100,7 +100,9 @@ def train_epoch(model, optimizer, baseline, lr_scheduler, epoch, val_dataset, pr
             step,
             batch,
             tb_logger,
-            opts,problem
+            opts,
+            problem,
+            opts.supervise_lambda
         )
 
         step += 1
@@ -122,7 +124,7 @@ def train_epoch(model, optimizer, baseline, lr_scheduler, epoch, val_dataset, pr
         )
 
     avg_reward = validate(model, val_dataset, opts)
-    wandb.log({"avg_cost": avg_reward})
+    wandb.log({"val_avg_reward": avg_reward})
  
     if not opts.no_tensorboard:
         tb_logger.log_value('val_avg_reward', avg_reward, step)
@@ -284,7 +286,9 @@ def train_batch(
         step,
         batch,
         tb_logger,
-        opts,problem
+        opts,
+        problem,
+        supervise_lambda
 ):
     x, bl_val = baseline.unwrap_batch(batch)
     x = move_to(x, opts.device)
@@ -295,7 +299,14 @@ def train_batch(
 
     x_aug = augment(x,opts.N_aug,problem)
 
-    cost, log_likelihood, proj_nodes = model(x_aug,return_proj=True)
+    if opts.num_equivariant_samples > 0:
+        cost, log_likelihood, ll_t_list, proj_nodes = model(x_aug,
+                                                num_equivariant_samples=opts.num_equivariant_samples,
+                                                return_proj=True)
+    else:
+        cost, log_likelihood, proj_nodes = model(x_aug,
+                                                num_equivariant_samples=0,
+                                                return_proj=True)
 
     ###################################################################### 
     # rotational invariant consistancy learning
@@ -318,9 +329,24 @@ def train_batch(
     # problem symmetric loss
     advantage = cost - cost.mean(dim=1).view(-1,1)
 
+    reinforce_loss = ((advantage) * log_likelihood).mean()
+    similarity_loss = similarity.mean()
+    loss = reinforce_loss - opts.alpha * similarity_loss
+    if opts.num_equivariant_samples > 0:
+        equivariant_loss = 0
+        for ll_t in ll_t_list:
+            equivariant_loss += -ll_t.mean()
+        equivariant_loss /= opts.num_equivariant_samples
+        loss += supervise_lambda * equivariant_loss
+        wandb.log({"equivariant_loss": equivariant_loss.item()})
 
-    loss = ((advantage) * log_likelihood).mean() - opts.alpha * similarity.mean()
-    
+    wandb.log({"loss": loss.item()})
+    wandb.log({"reinforce_loss": reinforce_loss.item()})
+    wandb.log({"similarity_loss": similarity_loss.item()})
+
+    #log nll
+    wandb.log({"nll": (-log_likelihood).mean().item()})
+
 
     optimizer.zero_grad()
     loss.backward()
