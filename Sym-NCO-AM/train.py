@@ -338,14 +338,25 @@ def train_batch(
             equivariant_loss += -ll_t.mean()
         equivariant_loss /= opts.num_equivariant_samples
         loss += supervise_lambda * equivariant_loss
+        if not opts.no_tensorboard:
+            tb_logger.log_value('equivariant_loss', equivariant_loss.item(), step)
         wandb.log({"equivariant_loss": equivariant_loss.item()})
+    
+
 
     wandb.log({"loss": loss.item()})
     wandb.log({"reinforce_loss": reinforce_loss.item()})
     wandb.log({"similarity_loss": similarity_loss.item()})
 
+    if not opts.no_tensorboard:
+        tb_logger.log_value('loss', loss.item(), step)
+        tb_logger.log_value('reinforce_loss', reinforce_loss.item(), step)
+        tb_logger.log_value('similarity_loss', similarity_loss.item(), step)
+
     #log nll
     wandb.log({"nll": (-log_likelihood).mean().item()})
+    if not opts.no_tensorboard:
+        tb_logger.log_value('nll', (-log_likelihood).mean().item(), step)
 
 
     optimizer.zero_grad()
