@@ -29,7 +29,7 @@ def run(opts):
     # Optionally configure tensorboard
     tb_logger = None
     if not opts.no_tensorboard:
-        if opts.log_name is not None:
+        if opts.log_name is None:
             tb_logger = TbLogger(os.path.join(opts.log_dir, "{}_{}".format(opts.problem, opts.graph_size), opts.run_name))
         else:
             tb_logger = TbLogger(os.path.join(opts.log_dir, "{}_{}".format(opts.problem, opts.graph_size), opts.log_name))

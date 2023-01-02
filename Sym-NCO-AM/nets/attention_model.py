@@ -5,6 +5,7 @@ from torch.utils.checkpoint import checkpoint
 import math
 from typing import NamedTuple
 from utils.tensor_functions import compute_in_batches
+from random import getrandbits
 
 from nets.graph_encoder import GraphAttentionEncoder
 from torch.nn import DataParallel
@@ -152,31 +153,65 @@ class AttentionModel(nn.Module):
 
         return go(pi)
 
-    def randomly_transform_pi(self, pi):
-        def unpack_routes(routes):
-            return [r[r != 0] for r in np.split(routes, np.where(routes == 0)[0]) if (r != 0).any()]
+    def randomly_transform_pi(self, pi, n):
+        def unpack_routes_2(a):
+            idx = np.where(a!=0)[0]
+            return np.split(a[idx],np.where(np.diff(idx)!=1)[0]+1)
         
         def permute_routes(routes):
             np.random.shuffle(routes)
             for i in range(len(routes)):
-                if np.random.randint(2) == 1:
+                if getrandbits(1):
                     routes[i] = routes[i][::-1]
             return routes
 
         def pack_routes(routes, max_len_tour, left_pad=0, right_pad=None):
+            global a1, a2, a3, a4
             routes = np.concatenate([r_ for r in routes for r_ in (r, [0])])[:-1]
             max_len_tour = max_len_tour or len(routes)
             right_pad = (max_len_tour - len(routes) - left_pad) if right_pad is None else right_pad
-            return np.pad(routes, (left_pad, right_pad)).astype(np.int16) 
+            answer = np.pad(routes, (left_pad, right_pad))
+            answer = answer.astype(np.int16) 
+            return answer
 
         def go(pi):
-            routes = [unpack_routes(routes) for routes in pi.detach().cpu().numpy()]
-            routes = [permute_routes(routes) for routes in routes]
-            routes = [pack_routes(routes, max_len_tour=pi.size(-1)) for routes in routes]
-            routes = [torch.tensor(route, device=pi.device, dtype=pi.dtype) for route in routes]
-            return torch.stack(routes)
+            routes_detached = pi.detach().cpu().numpy()
+            orig_routes = [unpack_routes_2(routes) for routes in routes_detached]
+            permuted_routes = []
+            for i in range(n):
+                routes = [permute_routes(routes) for routes in orig_routes]
+                routes = [pack_routes(routes, max_len_tour=pi.size(-1)) for routes in routes]
+                routes = [torch.tensor(route, device=pi.device, dtype=pi.dtype) for route in routes]
+                permuted_routes.append(torch.stack(routes))
+            return permuted_routes
         
         return go(pi)
+
+    # def randomly_transform_pi(self, pi):
+    #     def unpack_routes(routes):
+    #         return [r[r != 0] for r in np.split(routes, np.where(routes == 0)[0]) if (r != 0).any()]
+        
+    #     def permute_routes(routes):
+    #         np.random.shuffle(routes)
+    #         for i in range(len(routes)):
+    #             if np.random.randint(2) == 1:
+    #                 routes[i] = routes[i][::-1]
+    #         return routes
+
+    #     def pack_routes(routes, max_len_tour, left_pad=0, right_pad=None):
+    #         routes = np.concatenate([r_ for r in routes for r_ in (r, [0])])[:-1]
+    #         max_len_tour = max_len_tour or len(routes)
+    #         right_pad = (max_len_tour - len(routes) - left_pad) if right_pad is None else right_pad
+    #         return np.pad(routes, (left_pad, right_pad)).astype(np.int16) 
+
+    #     def go(pi):
+    #         routes = [unpack_routes(routes) for routes in pi.detach().cpu().numpy()]
+    #         routes = [permute_routes(routes) for routes in routes]
+    #         routes = [pack_routes(routes, max_len_tour=pi.size(-1)) for routes in routes]
+    #         routes = [torch.tensor(route, device=pi.device, dtype=pi.dtype) for route in routes]
+    #         return torch.stack(routes)
+        
+    #     return go(pi)
 
     def transform_pi(self, input, pi):
         def cart2pol(x, y):
@@ -263,11 +298,12 @@ class AttentionModel(nn.Module):
         if num_equivariant_samples > 0:
             pi_t_list = []
             ll_t_list = []
+            transformed_pi = self.randomly_transform_pi(pi, num_equivariant_samples)
             for i in range(num_equivariant_samples):
-                pi_t = self.randomly_transform_pi(pi)
+                pi_t = transformed_pi[i]
                 _log_p_t = self._inner_fixed_action(input, embeddings, pi_t)
-                cost_t, mask_t = self.problem.get_costs(input, pi_t)
-                ll_t = self._calc_log_likelihood(_log_p_t, pi_t, mask_t)
+                # cost_t, mask_t = self.problem.get_costs(input, pi_t)
+                ll_t = self._calc_log_likelihood(_log_p_t, pi_t, None)
                 pi_t_list.append(pi_t)
                 ll_t_list.append(ll_t)
 
@@ -424,14 +460,10 @@ class AttentionModel(nn.Module):
         return torch.stack(outputs, 1), torch.stack(sequences, 1)
 
     def _inner_fixed_action(self, input, embeddings, sequences):
-
         outputs = []
-
         state = self.problem.make_state(input)
-
         # Compute keys, values for the glimpse and keys for the logits once as they can be reused in every step
         fixed = self._precompute(embeddings)
-
         batch_size = state.ids.size(0)
 
         # Perform decoding steps
